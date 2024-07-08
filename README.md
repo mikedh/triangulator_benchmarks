@@ -1,3 +1,7 @@
+# triangulator_benchmarks
+
+A corpus of polygons in the WKT format and a somewhat apples-to-apples benchmark of triangulation options for Python. `pip install manifold3d triangle mapbox_earcut trimesh` should be enough (trimesh is only for `grouping.unique_rows`, which `triangle` needs to not segfault on duplicate points). 
+
 Here are the metrics, normalized against the fastest. As you can tell `mapbox_earcut` wins on performance, i.e. for the mean time `earcut` is 1.0000 and manifold is 31.9110 that means the mean time of manifold is more than 30x slower than earcut for the triangulation. The manifold one is almost certainly more robust than earcut, and triangle almost certainly produces meshes more usable for analysis tasks. So in conclusion, hmm.
 
 | METRIC | triangle | manifold | earcut |

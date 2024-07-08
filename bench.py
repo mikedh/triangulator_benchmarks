@@ -1,32 +1,35 @@
+"""
+A lightly altered version of `trimesh.creation.triangulate_polygon`
+for benchmarking in mostly isolated circumstances
+"""
 import collections
 import json
 import os
 import timeit
 from logging import StreamHandler, getLogger
 from typing import Optional
-
-# all the pip installable options:
-# new hotness
-import manifold3d
-
-# release for Numpy2 blocked by PR
-import mapbox_earcut
 import numpy as np
 import shapely
+from numpy.typing import NDArray
+from shapely.geometry import Polygon
+
+# triangle crashes hard without this
+from trimesh import grouping
+
 
 # has license people complain about
 # produces highest "quality" meshes if you care about that
 import triangle
-from numpy.typing import NDArray
-from shapely.geometry import Polygon
+# release for Numpy2 blocked by PR
+import mapbox_earcut
+# new option being benchmarked
+import manifold3d
 
-from trimesh import grouping
+
 
 log = getLogger(__name__)
 log.addHandler(StreamHandler())
-
 _cwd = os.path.abspath(os.path.expanduser(os.path.dirname(__file__)))
-
 
 engines = ["triangle", "manifold", "earcut"]
 

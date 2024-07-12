@@ -2,6 +2,7 @@
 A lightly altered version of `trimesh.creation.triangulate_polygon`
 for benchmarking in mostly isolated circumstances
 """
+
 import collections
 import json
 import os
@@ -10,8 +11,10 @@ from logging import StreamHandler, getLogger
 from typing import Optional
 import numpy as np
 import shapely
-from numpy.typing import NDArray
 from shapely.geometry import Polygon
+import shapely.ops
+
+import trimesh
 
 # triangle crashes hard without this
 from trimesh import grouping
@@ -20,18 +23,19 @@ from trimesh import grouping
 # has license people complain about
 # produces highest "quality" meshes if you care about that
 import triangle
+
 # release for Numpy2 blocked by PR
 import mapbox_earcut
+
 # new option being benchmarked
 import manifold3d
-
 
 
 log = getLogger(__name__)
 log.addHandler(StreamHandler())
 _cwd = os.path.abspath(os.path.expanduser(os.path.dirname(__file__)))
 
-engines = ["triangle", "manifold", "earcut"]
+engines = ["shapely", "triangle", "manifold", "earcut"]
 
 
 def triangulate_polygon(
@@ -106,6 +110,25 @@ def triangulate_polygon(
         # run the triangulation
         result = triangle.triangulate(arg, triangle_args)
         return result["vertices"], result["triangles"]
+    elif engine == "shapely":
+        tri = shapely.ops.triangulate(polygon)
+        # vertices are not merged
+        raw = np.array([t.exterior.coords for t in tri], dtype=np.float64)[:, :3, :]
+
+        # note this is only *almost* apples-apples as triangles are 100% disconnected
+        # soup that would need a `trimesh.grouping.unique_rows` or something to merge
+        vertices = raw.reshape((-1, 2))
+        faces = np.arange(len(vertices)).reshape((-1, 3))
+
+        # this slows down the results substantially but is the real apples-apples
+        # it had no effect on the error we were seeingg
+        # unique, inverse = trimesh.grouping.unique_rows(vertices)
+        # faces = inverse[faces]
+        # vertices = vertices[unique]
+        # show it as a 3D thing and press `w` to see the triangultion
+        # trimesh.Trimesh(np.column_stack((vertices, np.zeros(len(vertices)))), faces).show()
+
+        return vertices, faces
 
     log.warning(
         "try running `pip install manifold3d`"
@@ -208,26 +231,14 @@ def _polygon_to_kwargs(polygon):
     return result
 
 
-def cross_2d(a: NDArray, b: NDArray) -> NDArray:
-    """
-    Numpy 2.0 depreciated cross products of 2D arrays.
-    """
-    return a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]
-
-
-def triangle_area(triangles):
-    vectors = np.diff(triangles, axis=1)
-    cross = cross_2d(vectors)
-    areas = np.sqrt((crosses**2).sum(axis=1)) / 2.0
-    return areas.sum()
-
-
+# load the corpus
 with open(os.path.join(_cwd, "polygons.json")) as f:
     polygons = [shapely.from_wkt(L) for L in json.load(f)]
 
 
 def benchmark(iterations: int = 3):
     times = {e: collections.defaultdict(list) for e in engines}
+    error = {e: [] for e in engines}
 
     # check triangulation of both meshpy and triangle engine
     # including an example that has interiors
@@ -236,7 +247,15 @@ def benchmark(iterations: int = 3):
         # make sure all our polygons triangulate reasonably
         for i, poly in enumerate(polygons):
             print(poly.area, len(poly.interiors))
+            # now check the area of the source polygon vs the result area
             v, f = triangulate_polygon(poly, engine=engine)
+
+            area_check = trimesh.triangles.area(
+                np.column_stack((v, np.zeros(len(v))))[f]
+            )
+
+            error[engine].append(np.abs(area_check.sum() - poly.area) / poly.area)
+
             # run asserts
             # check_triangulation(v, f, poly.area)
             try:
@@ -259,7 +278,9 @@ def benchmark(iterations: int = 3):
                 log.error("failed to benchmark triangle", exc_info=True)
     log.info(f"benchmarked triangulation on {len(polygons)} polygons: {times!s}")
 
-    return times
+    error = {k: np.array(v) for k, v in error.items()}
+
+    return times, error
 
 
 if __name__ == "__main__":
@@ -268,8 +289,7 @@ if __name__ == "__main__":
        
     """
 
-    b = benchmark()
-
+    b, err = benchmark()
     stats = {k: np.array([min(t) for t in v.values()]) for k, v in b.items()}
 
     metrics = {
@@ -277,6 +297,8 @@ if __name__ == "__main__":
         "std": lambda x: x.std(),
         "median": lambda x: np.median(x),
         "total": lambda x: x.sum(),
+        "max": lambda x: x.max(),
+        "min": lambda x: x.min(),
     }
 
     results = {}
@@ -284,13 +306,27 @@ if __name__ == "__main__":
         item = {k: func(s) for k, s in stats.items()}
         results[metric] = {k: v / min(item.values()) for k, v in item.items()}
 
-    mark = ["| METRIC |" + " | ".join(engines) + " |"]
-    mark.append("| -- | -- | -- | -- |")
+    mark = ["| TIME METRIC |" + " | ".join(engines) + " |"]
+    mark.append("| -- | -- | -- | -- | -- |")
 
     for m, vs in results.items():
         mark.append(f"| {m} |" + " | ".join(f" {vs[e]:0.4f}" for e in engines) + " |")
 
-    report = "Here are the metrics, normalized against the fastest. As you can tell `mapbox_earcut` wins on performance, i.e. for the mean time `earcut` is 1.0000 and manifold is 32.56 that means the mean time of manifold is 32.56x that of earcut."
+    report = "# triangulator_benchmarks\n\n  A corpus of polygons in the WKT format and a somewhat apples-to-apples benchmark of triangulation options for Python. `pip install manifold3d triangle mapbox_earcut trimesh` should be enough (trimesh is only for `grouping.unique_rows`, which `triangle` needs to not segfault on duplicate points).\n\n"
+
+    report += "Here are the time metrics normalized against the fastest. As you can tell `mapbox_earcut` wins on performance, i.e. for the mean time `earcut` is 1.0000 and if manifold is 30.0 that means the mean time of manifold is 30x slower than that of earcut."
+
+    report += "\n\n" + "\n".join(mark)
+
+    report += '\n\nTriangulation quality and error is a "whole thing" that I don\'t have a great amount of insight into or opinions on. This is measuring the simplest possible thing I could think of: the difference between triangle sum area and polygon area normalized to polygon area. These values are per-polygon and probably the most relevant value is `max`.'
+
+    mark = ["| ERROR METRIC |" + " | ".join(engines) + " |"]
+    mark.append("| -- | -- | -- | -- | -- |")
+
+    for mn, mf in metrics.items():
+        mark.append(
+            f"| {mn} |" + " | ".join(f" {mf(err[e]):0.4f}" for e in engines) + " |"
+        )
 
     report += "\n\n" + "\n".join(mark)
 
